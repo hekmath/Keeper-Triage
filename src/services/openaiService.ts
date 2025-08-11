@@ -1,7 +1,7 @@
 import { openai } from '@ai-sdk/openai';
 import { generateText, stepCountIs, streamText, tool } from 'ai';
 import { z } from 'zod';
-import { Message } from '../types/chat.types';
+import type { Message } from '../database/schema';
 
 const transferToolSchema = z.object({
   reason: z.string().describe('Brief reason for the transfer'),
@@ -44,16 +44,16 @@ export class OpenAIService {
   async generateResponse(
     sessionId: string,
     messages: Message[],
-    botContext?: string
+    botContext?: string | null
   ): Promise<{
     content: string;
   }> {
     try {
       const systemPrompt = this.buildSystemPrompt(botContext);
 
+      // Convert database messages to AI SDK format
       const formattedMessages = messages.map((msg) => ({
-        role:
-          msg.sender === 'user' ? ('user' as const) : ('assistant' as const),
+        role: this.mapSenderToRole(msg.sender),
         content: msg.content,
       }));
 
@@ -97,11 +97,11 @@ export class OpenAIService {
     }
   }
 
-  async generateGreeting(botContext?: string): Promise<string> {
+  async generateGreeting(botContext?: string | null): Promise<string> {
     return 'Hello! How can I help you today?';
   }
 
-  private buildSystemPrompt(botContext?: string): string {
+  private buildSystemPrompt(botContext?: string | null): string {
     const basePrompt = `You are a helpful customer service assistant. Be friendly, professional, and concise.
 
 You have access to various tools to help customers. Use the appropriate tools based on what the customer needs - the tools will automatically be available when relevant to the conversation context.
@@ -113,14 +113,30 @@ Always prioritize providing helpful, accurate information and excellent customer
       : basePrompt;
   }
 
+  private mapSenderToRole(
+    sender: 'user' | 'bot' | 'agent' | 'system'
+  ): 'user' | 'assistant' {
+    // Map database sender types to AI SDK role types
+    switch (sender) {
+      case 'user':
+        return 'user';
+      case 'bot':
+      case 'agent':
+      case 'system':
+        return 'assistant';
+      default:
+        return 'assistant';
+    }
+  }
+
   async *streamResponse(
     messages: Message[],
-    botContext?: string
+    botContext?: string | null
   ): AsyncGenerator<string> {
     try {
+      // Convert database messages to AI SDK format
       const formattedMessages = messages.map((msg) => ({
-        role:
-          msg.sender === 'user' ? ('user' as const) : ('assistant' as const),
+        role: this.mapSenderToRole(msg.sender),
         content: msg.content,
       }));
 

@@ -122,7 +122,7 @@ export function handleSocketConnection(io: Server, socket: Socket) {
           const response = await openaiService.generateResponse(
             sessionId,
             messages,
-            session.botContext ?? undefined
+            session.botContext
           );
 
           // Add bot response
@@ -209,7 +209,9 @@ export function handleSocketConnection(io: Server, socket: Socket) {
       );
 
       if (success) {
-        const session = await chatService.getSession(data.sessionId);
+        const sessionWithMessages = await chatService.getSessionWithMessages(
+          data.sessionId
+        );
         const agent = await chatService.getAgent(agentId);
 
         socket.join(`session:${data.sessionId}`);
@@ -233,7 +235,11 @@ export function handleSocketConnection(io: Server, socket: Socket) {
           );
         }
 
-        socket.emit('session:assigned', { sessionId: data.sessionId, session });
+        // Send session with full message history to agent
+        socket.emit('session:assigned', {
+          sessionId: data.sessionId,
+          session: sessionWithMessages?.session || sessionWithMessages,
+        });
 
         // Update queue for all agents
         const waitingSessions = await chatService.getWaitingSessions();

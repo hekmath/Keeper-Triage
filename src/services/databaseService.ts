@@ -159,6 +159,15 @@ export class DatabaseService {
     return message;
   }
 
+  async getSessionMessageCount(sessionId: string): Promise<number> {
+    const [result] = await db
+      .select({ count: count() })
+      .from(messages)
+      .where(eq(messages.sessionId, sessionId));
+
+    return result.count;
+  }
+
   async getSessionMessages(sessionId: string): Promise<Message[]> {
     return await db
       .select()

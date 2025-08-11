@@ -182,18 +182,26 @@ export class ChatService {
   async getWaitingSessions(): Promise<any[]> {
     const queueSessions = await this.queueService.getWaitingSessions();
 
-    // Enrich with session data
+    // Enrich with session data and message counts
     const enrichedSessions = await Promise.all(
       queueSessions.map(async (queueInfo) => {
         const session = await this.dbService.getSession(queueInfo.sessionId);
+        if (!session) return null;
+
+        // Get message count for this session (more efficient than loading all messages)
+        const messages = await this.dbService.getSessionMessages(
+          queueInfo.sessionId
+        );
+
         return {
           ...session,
+          messages, // Include messages array for frontend compatibility
           queueInfo,
         };
       })
     );
 
-    return enrichedSessions.filter((session) => session.id); // Filter out null sessions
+    return enrichedSessions.filter((session) => session?.id); // Filter out null sessions
   }
 
   async clearQueue(): Promise<number> {
