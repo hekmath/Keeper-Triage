@@ -1,20 +1,13 @@
 import { Server, Socket } from 'socket.io';
-import { ChatManager } from './chatManager';
+import { ChatService } from '../services/chatService';
 import { OpenAIService } from '../services/openaiService';
 
-const chatManager = new ChatManager();
+const chatService = new ChatService();
 const openaiService = new OpenAIService();
 
-// Set up the transfer callback
+// Set up the transfer callback to work with new services
 openaiService.setTransferCallback(async (sessionId, reason, priority) => {
-  await chatManager.transferToQueue(sessionId, reason, priority);
-
-  // Get the socket.io server instance to emit events
-  const session = chatManager.getSession(sessionId);
-  if (session) {
-    // You'll need to pass the io instance to this callback
-    // For now, we'll handle the notification in the main handler
-  }
+  await chatService.transferToQueue(sessionId, reason, priority);
 });
 
 export function handleSocketConnection(io: Server, socket: Socket) {
@@ -22,7 +15,7 @@ export function handleSocketConnection(io: Server, socket: Socket) {
 
   // Update the transfer callback to include io instance
   openaiService.setTransferCallback(async (sessionId, reason, priority) => {
-    await chatManager.transferToQueue(sessionId, reason, priority);
+    await chatService.transferToQueue(sessionId, reason, priority);
 
     // Emit status change
     socket.emit('status:changed', { status: 'waiting' });
@@ -30,22 +23,22 @@ export function handleSocketConnection(io: Server, socket: Socket) {
     // Notify available agents
     io.to('agents:available').emit('queue:customer_waiting', {
       sessionId,
-      session: chatManager.getSession(sessionId),
+      session: await chatService.getSession(sessionId),
       transferReason: reason,
       priority,
     });
 
     // Send queue update to all agents
+    const waitingSessions = await chatService.getWaitingSessions();
     io.to('agents:available').emit('queue:update', {
-      sessions: chatManager.getWaitingSessions(),
+      sessions: waitingSessions,
     });
 
     // Add system message
-    const systemMessage = chatManager.addMessage(
+    const queuePosition = await chatService.getQueuePosition(sessionId);
+    const systemMessage = await chatService.addMessage(
       sessionId,
-      `You are being transferred to a human agent. You are #${chatManager.getQueuePosition(
-        sessionId
-      )} in the queue.`,
+      `You are being transferred to a human agent. You are #${queuePosition} in the queue.`,
       'system'
     );
 
@@ -63,10 +56,12 @@ export function handleSocketConnection(io: Server, socket: Socket) {
     'customer:start_chat',
     async (data: { userId?: string; botContext?: string; metadata?: any }) => {
       try {
-        const session = chatManager.createSession(
+        const session = await chatService.createSession(
           data.userId || socket.id,
-          data.botContext
+          data.botContext,
+          data.metadata
         );
+
         socket.join(`session:${session.id}`);
         socket.data.sessionId = session.id;
         socket.data.role = 'customer';
@@ -77,7 +72,7 @@ export function handleSocketConnection(io: Server, socket: Socket) {
         });
 
         const greeting = await openaiService.generateGreeting(data.botContext);
-        const greetingMessage = chatManager.addMessage(
+        const greetingMessage = await chatService.addMessage(
           session.id,
           greeting,
           'bot'
@@ -103,7 +98,7 @@ export function handleSocketConnection(io: Server, socket: Socket) {
     async (data: { sessionId: string; content: string }) => {
       try {
         const { sessionId, content } = data;
-        const session = chatManager.getSession(sessionId);
+        const session = await chatService.getSession(sessionId);
 
         if (!session) {
           socket.emit('error', { message: 'Session not found' });
@@ -111,7 +106,11 @@ export function handleSocketConnection(io: Server, socket: Socket) {
         }
 
         // Add customer message
-        const userMessage = chatManager.addMessage(sessionId, content, 'user');
+        const userMessage = await chatService.addMessage(
+          sessionId,
+          content,
+          'user'
+        );
         if (userMessage) {
           io.to(`session:${sessionId}`).emit('message:received', userMessage);
         }
@@ -119,15 +118,15 @@ export function handleSocketConnection(io: Server, socket: Socket) {
         // Handle based on session status
         if (session.status === 'bot') {
           // AI processes message and may auto-transfer
-          const messages = chatManager.getSessionMessages(sessionId);
+          const messages = await chatService.getSessionMessages(sessionId);
           const response = await openaiService.generateResponse(
             sessionId,
             messages,
-            session.botContext
+            session.botContext ?? undefined
           );
 
           // Add bot response
-          const botMessage = chatManager.addMessage(
+          const botMessage = await chatService.addMessage(
             sessionId,
             response.content,
             'bot'
@@ -144,32 +143,29 @@ export function handleSocketConnection(io: Server, socket: Socket) {
     }
   );
 
-  // NEW: Handle explicit customer chat ending
-  socket.on('customer:end_chat', (data: { sessionId: string }) => {
+  // Handle explicit customer chat ending
+  socket.on('customer:end_chat', async (data: { sessionId: string }) => {
     try {
-      const session = chatManager.getSession(data.sessionId);
+      const session = await chatService.getSession(data.sessionId);
       if (!session) return;
 
       console.log(
         `👋 Customer explicitly ending chat: ${data.sessionId} (Status: ${session.status})`
       );
 
-      // Remove from queue if waiting
-      if (session.status === 'waiting') {
-        chatManager.removeFromQueue(data.sessionId);
-        console.log(`🗑️ Removed session ${data.sessionId} from queue`);
-
-        // Notify agents that customer left the queue
-        io.to('agents:available').emit('queue:update', {
-          sessions: chatManager.getWaitingSessions(),
-        });
-      }
-
-      // Close the session properly
-      chatManager.closeSession(data.sessionId);
+      // Close the session (this handles queue removal automatically)
+      await chatService.closeSession(data.sessionId);
 
       // Notify anyone in the session room
       io.to(`session:${data.sessionId}`).emit('session:closed');
+
+      // Update agents with new queue state
+      if (session.status === 'waiting') {
+        const waitingSessions = await chatService.getWaitingSessions();
+        io.to('agents:available').emit('queue:update', {
+          sessions: waitingSessions,
+        });
+      }
 
       console.log(
         `✅ Session ${data.sessionId} properly closed and cleaned up`
@@ -180,16 +176,16 @@ export function handleSocketConnection(io: Server, socket: Socket) {
   });
 
   // ============= AGENT EVENTS =============
-  socket.on('agent:join', (data: { name: string }) => {
+  socket.on('agent:join', async (data: { name: string }) => {
     try {
-      const agent = chatManager.addAgent(socket.id, data.name);
+      const agent = await chatService.addAgent(socket.id, data.name);
       socket.join('agents:available');
       socket.data.agentId = agent.id;
       socket.data.role = 'agent';
 
       socket.emit('agent:joined', { agentId: agent.id, agent });
 
-      const waitingSessions = chatManager.getWaitingSessions();
+      const waitingSessions = await chatService.getWaitingSessions();
       socket.emit('queue:update', { sessions: waitingSessions });
 
       console.log(`👨‍💼 Agent joined: ${data.name} (${agent.id})`);
@@ -199,7 +195,7 @@ export function handleSocketConnection(io: Server, socket: Socket) {
     }
   });
 
-  socket.on('agent:pickup_session', (data: { sessionId: string }) => {
+  socket.on('agent:pickup_session', async (data: { sessionId: string }) => {
     try {
       const agentId = socket.data.agentId;
       if (!agentId) {
@@ -207,19 +203,23 @@ export function handleSocketConnection(io: Server, socket: Socket) {
         return;
       }
 
-      const success = chatManager.assignSessionToAgent(data.sessionId, agentId);
+      const success = await chatService.assignSessionToAgent(
+        data.sessionId,
+        agentId
+      );
 
       if (success) {
-        const session = chatManager.getSession(data.sessionId);
+        const session = await chatService.getSession(data.sessionId);
+        const agent = await chatService.getAgent(agentId);
+
         socket.join(`session:${data.sessionId}`);
 
-        const agent = chatManager.getAgent(agentId);
         io.to(`session:${data.sessionId}`).emit('status:changed', {
           status: 'agent',
           agentName: agent?.name,
         });
 
-        const notificationMessage = chatManager.addMessage(
+        const notificationMessage = await chatService.addMessage(
           data.sessionId,
           `${agent?.name} has joined the chat. How can I help you today?`,
           'agent',
@@ -234,8 +234,11 @@ export function handleSocketConnection(io: Server, socket: Socket) {
         }
 
         socket.emit('session:assigned', { sessionId: data.sessionId, session });
+
+        // Update queue for all agents
+        const waitingSessions = await chatService.getWaitingSessions();
         io.to('agents:available').emit('queue:update', {
-          sessions: chatManager.getWaitingSessions(),
+          sessions: waitingSessions,
         });
 
         console.log(
@@ -252,7 +255,7 @@ export function handleSocketConnection(io: Server, socket: Socket) {
 
   socket.on(
     'agent:send_message',
-    (data: { sessionId: string; content: string }) => {
+    async (data: { sessionId: string; content: string }) => {
       try {
         const agentId = socket.data.agentId;
         if (!agentId) {
@@ -260,7 +263,7 @@ export function handleSocketConnection(io: Server, socket: Socket) {
           return;
         }
 
-        const message = chatManager.addMessage(
+        const message = await chatService.addMessage(
           data.sessionId,
           data.content,
           'agent',
@@ -277,7 +280,7 @@ export function handleSocketConnection(io: Server, socket: Socket) {
     }
   );
 
-  socket.on('agent:close_session', (data: { sessionId: string }) => {
+  socket.on('agent:close_session', async (data: { sessionId: string }) => {
     try {
       const agentId = socket.data.agentId;
       if (!agentId) {
@@ -285,12 +288,16 @@ export function handleSocketConnection(io: Server, socket: Socket) {
         return;
       }
 
-      chatManager.closeSession(data.sessionId);
+      await chatService.closeSession(data.sessionId);
       io.to(`session:${data.sessionId}`).emit('session:closed');
 
-      const agent = chatManager.getAgent(agentId);
-      if (agent && agent.activeSessions.length === 0) {
-        io.to('agents:available').emit('agent:available', { agentId });
+      // Check if agent is now available
+      const agent = await chatService.getAgent(agentId);
+      if (agent) {
+        const activeSessions = await chatService.getStats();
+        if (activeSessions) {
+          io.to('agents:available').emit('agent:available', { agentId });
+        }
       }
 
       console.log(`🔒 Session ${data.sessionId} closed by agent ${agentId}`);
@@ -301,23 +308,18 @@ export function handleSocketConnection(io: Server, socket: Socket) {
   });
 
   // ============= ADMIN/DEBUG EVENTS =============
-  socket.on('admin:get_stats', () => {
-    const stats = chatManager.getStats();
-    socket.emit('stats:update', stats);
+  socket.on('admin:get_stats', async () => {
+    try {
+      const stats = await chatService.getStats();
+      socket.emit('stats:update', stats);
+    } catch (error) {
+      console.error('Error getting stats:', error);
+    }
   });
 
-  // NEW: Debug queue information
-  socket.on('admin:debug_queue', () => {
+  socket.on('admin:debug_queue', async () => {
     try {
-      const stats = chatManager.getStats();
-      const queueStatus = chatManager.getQueueStatus();
-
-      const debugInfo = {
-        ...stats,
-        queueItems: queueStatus,
-        timestamp: new Date().toISOString(),
-      };
-
+      const debugInfo = await chatService.debugQueue();
       socket.emit('queue:debug_info', debugInfo);
       console.log('🔍 Debug info sent:', debugInfo);
     } catch (error) {
@@ -325,101 +327,83 @@ export function handleSocketConnection(io: Server, socket: Socket) {
     }
   });
 
-  // NEW: Clear queue for debugging (development only)
-  socket.on('admin:clear_queue', () => {
+  socket.on('admin:clear_queue', async () => {
     try {
-      // Only allow in development or with proper auth
-      if (process.env.NODE_ENV !== 'development') {
-        console.log('⚠️ Queue clear attempted in production - blocked');
-        return;
-      }
-
-      // Get all sessions in queue before clearing
-      const queueSessions = chatManager.getWaitingSessions();
-
-      // Clear the queue
-      chatManager.clearQueue();
-
-      // Close all the sessions that were in queue
-      queueSessions.forEach((session) => {
-        chatManager.closeSession(session.id);
-        io.to(`session:${session.id}`).emit('session:closed');
-      });
+      const clearedCount = await chatService.clearQueue();
 
       // Notify all agents
+      const waitingSessions = await chatService.getWaitingSessions();
       io.to('agents:available').emit('queue:update', {
-        sessions: [],
+        sessions: waitingSessions,
       });
 
-      console.log(
-        `🗑️ Cleared ${queueSessions.length} sessions from queue (DEBUG)`
-      );
+      console.log(`🗑️ Cleared ${clearedCount} sessions from queue (DEBUG)`);
     } catch (error) {
       console.error('Error clearing queue:', error);
     }
   });
 
   // ============= ENHANCED DISCONNECTION HANDLING =============
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log('👤 User disconnected:', socket.id);
 
-    if (socket.data.role === 'agent' && socket.data.agentId) {
-      const agentId = socket.data.agentId;
-      const agent = chatManager.getAgent(agentId);
+    try {
+      // Handle agent disconnection
+      if (socket.data.role === 'agent' && socket.data.agentId) {
+        const agentId = socket.data.agentId;
 
-      if (agent) {
-        for (const sid of agent.activeSessions) {
-          chatManager.updateSessionStatus(sid, 'waiting');
-          const session = chatManager.getSession(sid);
-          if (session) {
-            session.assignedAgent = undefined;
-            io.to(`session:${sid}`).emit('status:changed', {
-              status: 'waiting',
+        // Remove agent (this automatically transfers sessions back to queue)
+        await chatService.removeAgent(agentId);
+
+        // Update queue for remaining agents
+        const waitingSessions = await chatService.getWaitingSessions();
+        io.to('agents:available').emit('queue:update', {
+          sessions: waitingSessions,
+        });
+
+        return;
+      }
+
+      // Handle customer disconnection
+      if (socket.data.role === 'customer' && socket.data.sessionId) {
+        const sessionId = socket.data.sessionId as string;
+        const session = await chatService.getSession(sessionId);
+
+        if (session) {
+          console.log(
+            `👋 Customer disconnected: ${sessionId} (Status: ${session.status})`
+          );
+
+          // Close the session (this handles queue removal automatically)
+          await chatService.closeSession(sessionId);
+          io.to(`session:${sessionId}`).emit('session:closed');
+
+          // Update agents if customer was in queue
+          if (session.status === 'waiting') {
+            const waitingSessions = await chatService.getWaitingSessions();
+            io.to('agents:available').emit('queue:update', {
+              sessions: waitingSessions,
             });
-            io.to(`session:${sid}`).emit(
-              'message:received',
-              chatManager.addMessage(
-                sid,
-                'Your agent disconnected. You are back in the queue. An agent will be with you shortly.',
-                'system'
-              )
-            );
           }
         }
       }
-
-      chatManager.removeAgent(agentId);
-      io.to('agents:available').emit('queue:update', {
-        sessions: chatManager.getWaitingSessions(),
-      });
-      return;
+    } catch (error) {
+      console.error('Error handling disconnect:', error);
     }
+  });
 
-    // Enhanced customer disconnect handling
-    if (socket.data.role === 'customer' && socket.data.sessionId) {
-      const sid = socket.data.sessionId as string;
-      const session = chatManager.getSession(sid);
-
-      if (session) {
-        console.log(
-          `👋 Customer disconnected: ${sid} (Status: ${session.status})`
-        );
-
-        // If customer was in queue, remove them
-        if (session.status === 'waiting') {
-          chatManager.removeFromQueue(sid);
-          console.log(`🗑️ Removed disconnected customer ${sid} from queue`);
-
-          // Update queue for agents
-          io.to('agents:available').emit('queue:update', {
-            sessions: chatManager.getWaitingSessions(),
-          });
-        }
-
-        // Close the session
-        chatManager.closeSession(sid);
-        io.to(`session:${sid}`).emit('session:closed');
-      }
+  // ============= HEALTH CHECK EVENT =============
+  socket.on('admin:health_check', async () => {
+    try {
+      const health = await chatService.healthCheck();
+      socket.emit('health:status', health);
+    } catch (error) {
+      console.error('Error checking health:', error);
+      socket.emit('health:status', {
+        database: false,
+        queue: false,
+        overall: false,
+      });
     }
   });
 }
