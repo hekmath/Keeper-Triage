@@ -1,14 +1,9 @@
-// src/index.ts
-import dotenv from 'dotenv';
-dotenv.config();
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 
 import { handleSocketConnection } from './socket/socketHandler';
-
-// Load environment variables
 
 // Validate required environment variables
 if (!process.env.OPENAI_API_KEY) {

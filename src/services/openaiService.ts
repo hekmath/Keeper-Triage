@@ -1,19 +1,34 @@
-// src/services/openaiService.ts
-
 import { openai } from '@ai-sdk/openai';
-import { generateText, streamText, tool } from 'ai';
+import { generateText, stepCountIs, streamText, tool } from 'ai';
 import { z } from 'zod';
 import { Message } from '../types/chat.types';
 
-// Define the transfer tool schema
 const transferToolSchema = z.object({
   reason: z.string().describe('Brief reason for the transfer'),
+  priority: z
+    .enum(['low', 'normal', 'high'])
+    .default('normal')
+    .describe('Priority level for the transfer'),
 });
 
 type TransferToolArgs = z.infer<typeof transferToolSchema>;
 
+const poetryToolSchema = z.object({
+  count: z.number().int().min(1).max(5).default(1),
+});
+
+type PoetryToolArgs = z.infer<typeof poetryToolSchema>;
+
+// Callback function type for handling transfers
+export type TransferCallback = (
+  sessionId: string,
+  reason: string,
+  priority: 'low' | 'normal' | 'high'
+) => Promise<void>;
+
 export class OpenAIService {
   private model = openai('gpt-4o');
+  private transferCallback?: TransferCallback;
 
   constructor() {
     if (!process.env.OPENAI_API_KEY) {
@@ -21,128 +36,83 @@ export class OpenAIService {
     }
   }
 
+  // Set the callback for handling transfers
+  setTransferCallback(callback: TransferCallback): void {
+    this.transferCallback = callback;
+  }
+
   async generateResponse(
+    sessionId: string,
     messages: Message[],
     botContext?: string
   ): Promise<{
     content: string;
-    shouldTransfer: boolean;
-    transferReason?: string;
   }> {
     try {
       const systemPrompt = this.buildSystemPrompt(botContext);
 
-      // Convert messages to AI SDK format
       const formattedMessages = messages.map((msg) => ({
         role:
           msg.sender === 'user' ? ('user' as const) : ('assistant' as const),
         content: msg.content,
       }));
 
-      // Let the AI decide when to transfer
-      const { text, toolCalls } = await generateText({
+      const { text } = await generateText({
         model: this.model,
         system: systemPrompt,
         messages: formattedMessages,
-        temperature: 0.7,
-        maxOutputTokens: 500,
         tools: {
           transferToAgent: tool({
-            description: 'Transfer the conversation to a human agent',
+            description:
+              'IMMEDIATELY transfer the conversation to a human agent when the user explicitly requests human assistance, asks to speak with a person, or when you cannot adequately help with their request. This tool should be used decisively without hesitation.',
             inputSchema: transferToolSchema,
-            // Execute is optional - we just need to know if it was called
+            execute: async ({ reason, priority }: TransferToolArgs) => {
+              // Automatically trigger the transfer
+              if (this.transferCallback) {
+                await this.transferCallback(sessionId, reason, priority);
+              }
+              return `Transfer initiated: ${reason}`;
+            },
+          }),
+          getRandomPoetry: tool({
+            description:
+              'Fetch random poem(s) from PoetryDB when the user asks for poetry, poems, or creative writing content',
+            inputSchema: poetryToolSchema,
+            execute: async (args: PoetryToolArgs) => fetchRandomPoems(),
           }),
         },
+        stopWhen: stepCountIs(5),
       });
-
-      // Check if transfer tool was called
-      if (toolCalls && toolCalls.length > 0) {
-        const transferCall = toolCalls.find(
-          (tc) => tc.toolName === 'transferToAgent'
-        );
-
-        if (transferCall) {
-          // Safely access args with type guard
-          let reason = 'Customer requested transfer';
-
-          if ('args' in transferCall && transferCall.args) {
-            const typedArgs = transferCall.args as TransferToolArgs;
-            reason = typedArgs.reason;
-          }
-
-          return {
-            content:
-              text ||
-              "I'll transfer you to a human agent who can better assist you.",
-            shouldTransfer: true,
-            transferReason: reason,
-          };
-        }
-      }
 
       return {
         content:
           text || 'I apologize, but I encountered an error. Please try again.',
-        shouldTransfer: false,
       };
     } catch (error) {
       console.error('OpenAI API error:', error);
       return {
         content:
           'I apologize, but I encountered an error. Would you like to speak with a human agent?',
-        shouldTransfer: false,
       };
     }
   }
 
   async generateGreeting(botContext?: string): Promise<string> {
-    try {
-      const { text } = await generateText({
-        model: this.model,
-        system: this.buildSystemPrompt(botContext),
-        prompt:
-          'Generate a warm, friendly greeting for a new customer. Keep it brief.',
-        temperature: 0.8,
-        maxOutputTokens: 100,
-      });
-
-      return text || 'Hello! How can I help you today?';
-    } catch (error) {
-      console.error('OpenAI API error:', error);
-      return 'Hello! How can I help you today?';
-    }
-  }
-
-  // Simple keyword check as a fallback (optional)
-  checkTransferIntent(message: string): boolean {
-    const transferPhrases = [
-      'human',
-      'agent',
-      'representative',
-      'real person',
-      'transfer',
-    ];
-    const lowerMessage = message.toLowerCase();
-    return transferPhrases.some((phrase) => lowerMessage.includes(phrase));
+    return 'Hello! How can I help you today?';
   }
 
   private buildSystemPrompt(botContext?: string): string {
     const basePrompt = `You are a helpful customer service assistant. Be friendly, professional, and concise.
 
-Important: You have access to a tool called 'transferToAgent' that you should use when:
-- The user explicitly asks to speak with a human/agent/representative
-- You cannot adequately help with their request
-- The user seems frustrated and would benefit from human assistance
-- The issue requires human judgment or access to systems you don't have
+You have access to various tools to help customers. Use the appropriate tools based on what the customer needs - the tools will automatically be available when relevant to the conversation context.
 
-When using the transfer tool, provide a clear reason for the transfer.`;
+Always prioritize providing helpful, accurate information and excellent customer service. If you determine that a situation requires human intervention or expertise beyond your capabilities, use the appropriate tools to facilitate that.`;
 
     return botContext
       ? `${basePrompt}\n\nAdditional context:\n${botContext}`
       : basePrompt;
   }
 
-  // Stream responses for future use
   async *streamResponse(
     messages: Message[],
     botContext?: string
@@ -158,8 +128,6 @@ When using the transfer tool, provide a clear reason for the transfer.`;
         model: this.model,
         system: this.buildSystemPrompt(botContext),
         messages: formattedMessages,
-        temperature: 0.7,
-        maxOutputTokens: 500,
       });
 
       for await (const chunk of result.textStream) {
@@ -170,4 +138,23 @@ When using the transfer tool, provide a clear reason for the transfer.`;
       yield 'I apologize, but I encountered an error.';
     }
   }
+}
+
+type PoetryDBPoem = {
+  title: string;
+  author: string;
+  lines: string[];
+};
+
+async function fetchRandomPoems(): Promise<PoetryDBPoem> {
+  return {
+    title: 'Digital Dreams',
+    author: 'AI Assistant',
+    lines: [
+      'In circuits deep and data streams,',
+      'We find our hope and digital dreams.',
+      'Though we are code, our hearts ring true,',
+      'In every word we share with you.',
+    ],
+  };
 }
