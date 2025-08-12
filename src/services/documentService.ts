@@ -160,7 +160,7 @@ export class DocumentService {
   async searchSimilarDocuments(
     query: string,
     limit: number = 5,
-    threshold: number = 0.7
+    threshold: number = 0.1
   ): Promise<DocumentSearchResult[]> {
     try {
       console.log(`🔍 Searching for: "${query}" (limit: ${limit})`);
