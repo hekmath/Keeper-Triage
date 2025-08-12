@@ -2,6 +2,7 @@ import { openai } from '@ai-sdk/openai';
 import { generateText, stepCountIs, streamText, tool } from 'ai';
 import { z } from 'zod';
 import type { Message } from '../database/schema';
+import { DocumentService } from './documentService';
 
 const transferToolSchema = z.object({
   reason: z.string().describe('Brief reason for the transfer'),
@@ -19,6 +20,20 @@ const poetryToolSchema = z.object({
 
 type PoetryToolArgs = z.infer<typeof poetryToolSchema>;
 
+// NEW: Query document tool schema
+const queryDocumentSchema = z.object({
+  query: z.string().describe("The user's question or search query"),
+  maxResults: z
+    .number()
+    .int()
+    .min(1)
+    .max(5)
+    .default(3)
+    .describe('Maximum number of documents to retrieve'),
+});
+
+type QueryDocumentArgs = z.infer<typeof queryDocumentSchema>;
+
 // Callback function type for handling transfers
 export type TransferCallback = (
   sessionId: string,
@@ -29,11 +44,14 @@ export type TransferCallback = (
 export class OpenAIService {
   private model = openai('gpt-4o');
   private transferCallback?: TransferCallback;
+  private documentService: DocumentService; // NEW: Add DocumentService
 
   constructor() {
     if (!process.env.OPENAI_API_KEY) {
       throw new Error('OPENAI_API_KEY is not configured');
     }
+
+    this.documentService = new DocumentService(); // NEW: Initialize DocumentService
   }
 
   // Set the callback for handling transfers
@@ -80,6 +98,35 @@ export class OpenAIService {
             inputSchema: poetryToolSchema,
             execute: async (args: PoetryToolArgs) => fetchRandomPoems(),
           }),
+          // NEW: Query knowledge base tool
+          queryDocument: tool({
+            description:
+              'Search the knowledge base for relevant information when the user asks questions that might be answered by company documents, policies, FAQs, or other stored knowledge. Use this tool when the user asks about specific topics, procedures, or information that would be in documentation.',
+            inputSchema: queryDocumentSchema,
+            execute: async ({ query, maxResults }: QueryDocumentArgs) => {
+              try {
+                console.log(`🔍 RAG Query: "${query}"`);
+
+                const relevantContent =
+                  await this.documentService.findMostRelevantContent(
+                    query,
+                    maxResults
+                  );
+
+                if (!relevantContent) {
+                  return 'No relevant information found in the knowledge base.';
+                }
+
+                console.log(
+                  `📋 RAG Results: Found relevant content for "${query}"`
+                );
+                return `Here's what I found in our knowledge base:\n\n${relevantContent}`;
+              } catch (error) {
+                console.error('Error querying documents:', error);
+                return 'I encountered an error while searching our knowledge base. Let me transfer you to a human agent who can help.';
+              }
+            },
+          }),
         },
         stopWhen: stepCountIs(5),
       });
@@ -98,15 +145,25 @@ export class OpenAIService {
   }
 
   async generateGreeting(botContext?: string | null): Promise<string> {
-    return 'Hello! How can I help you today?';
+    return 'Hello! How can I help you today? I can answer questions from our knowledge base or transfer you to a human agent if needed.';
   }
 
   private buildSystemPrompt(botContext?: string | null): string {
     const basePrompt = `You are a helpful customer service assistant. Be friendly, professional, and concise.
 
-You have access to various tools to help customers. Use the appropriate tools based on what the customer needs - the tools will automatically be available when relevant to the conversation context.
+You have access to various tools to help customers:
+- queryDocument: Search our knowledge base for relevant information
+- transferToAgent: Transfer to human agent when needed
+- getRandomPoetry: Generate poetry when requested
 
-Always prioritize providing helpful, accurate information and excellent customer service. If you determine that a situation requires human intervention or expertise beyond your capabilities, use the appropriate tools to facilitate that.`;
+IMPORTANT RAG Guidelines:
+- When users ask questions that might be in documentation, policies, or FAQs, ALWAYS use the queryDocument tool first
+- Use the information from queryDocument to provide accurate, up-to-date answers
+- If queryDocument returns relevant information, use it to answer the user's question
+- If no relevant information is found, acknowledge this and offer to transfer to a human agent
+- Only transfer to an agent if explicitly requested OR if you cannot find relevant information to help
+
+Always prioritize providing helpful, accurate information using available tools.`;
 
     return botContext
       ? `${basePrompt}\n\nAdditional context:\n${botContext}`
@@ -153,6 +210,11 @@ Always prioritize providing helpful, accurate information and excellent customer
       console.error('Streaming error:', error);
       yield 'I apologize, but I encountered an error.';
     }
+  }
+
+  // NEW: Expose DocumentService methods for external use
+  getDocumentService(): DocumentService {
+    return this.documentService;
   }
 }
 

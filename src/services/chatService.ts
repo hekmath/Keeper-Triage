@@ -1,14 +1,22 @@
 import { DatabaseService } from './databaseService';
 import { QueueService } from './queueService';
-import type { ChatSession, Message, Agent } from '../database/schema';
+import { DocumentService } from './documentService'; // NEW: Add DocumentService
+import type {
+  ChatSession,
+  Message,
+  Agent,
+  KnowledgeDocument,
+} from '../database/schema';
 
 export class ChatService {
   private dbService: DatabaseService;
   private queueService: QueueService;
+  private documentService: DocumentService; // NEW: Add DocumentService
 
   constructor() {
     this.dbService = new DatabaseService();
     this.queueService = new QueueService();
+    this.documentService = new DocumentService(); // NEW: Initialize DocumentService
   }
 
   // ============= SESSION MANAGEMENT =============
@@ -332,12 +340,53 @@ export class ChatService {
     return await this.dbService.getAllAgents();
   }
 
+  // ============= NEW: DOCUMENT MANAGEMENT =============
+
+  async addDocument(
+    title: string,
+    content: string,
+    metadata?: Record<string, any>
+  ): Promise<KnowledgeDocument> {
+    return await this.documentService.addDocument(title, content, metadata);
+  }
+
+  async updateDocument(
+    id: number,
+    title?: string,
+    content?: string,
+    metadata?: Record<string, any>
+  ): Promise<KnowledgeDocument | null> {
+    return await this.documentService.updateDocument(
+      id,
+      title,
+      content,
+      metadata
+    );
+  }
+
+  async deleteDocument(id: number): Promise<boolean> {
+    return await this.documentService.deleteDocument(id);
+  }
+
+  async getDocument(id: number): Promise<KnowledgeDocument | null> {
+    return await this.documentService.getDocument(id);
+  }
+
+  async getAllDocuments(): Promise<KnowledgeDocument[]> {
+    return await this.documentService.getAllDocuments();
+  }
+
+  async searchDocuments(query: string, limit?: number): Promise<any[]> {
+    return await this.documentService.searchSimilarDocuments(query, limit);
+  }
+
   // ============= STATISTICS & MONITORING =============
 
   async getStats() {
-    const [dbStats, queueStats] = await Promise.all([
+    const [dbStats, queueStats, docStats] = await Promise.all([
       this.dbService.getSystemStats(),
       this.queueService.getQueueStats(),
+      this.documentService.getDocumentStats(), // NEW: Include document stats
     ]);
 
     return {
@@ -349,6 +398,12 @@ export class ChatService {
         low: queueStats.low,
       },
       avgWaitTime: queueStats.avgWaitTime,
+      // NEW: Document stats
+      knowledgeBase: {
+        totalDocuments: docStats.totalDocuments,
+        avgContentLength: docStats.avgContentLength,
+        recentDocuments: docStats.recentDocuments,
+      },
     };
   }
 
@@ -374,27 +429,35 @@ export class ChatService {
   async healthCheck(): Promise<{
     database: boolean;
     queue: boolean;
+    documents: boolean; // NEW: Document service health
     overall: boolean;
   }> {
     try {
-      const [dbHealthy, queueHealth] = await Promise.all([
+      const [dbHealthy, queueHealth, docHealth] = await Promise.all([
         this.dbService
           .getSystemStats()
           .then(() => true)
           .catch(() => false),
         this.queueService.healthCheck(),
+        this.documentService.healthCheck(), // NEW: Document service health check
       ]);
 
       return {
         database: dbHealthy,
         queue: queueHealth.redis && queueHealth.queuesAccessible,
-        overall: dbHealthy && queueHealth.redis && queueHealth.queuesAccessible,
+        documents: docHealth.database && docHealth.embeddings, // NEW
+        overall:
+          dbHealthy &&
+          queueHealth.redis &&
+          queueHealth.queuesAccessible &&
+          docHealth.database,
       };
     } catch (error) {
       console.error('Health check failed:', error);
       return {
         database: false,
         queue: false,
+        documents: false, // NEW
         overall: false,
       };
     }
@@ -405,19 +468,29 @@ export class ChatService {
   async cleanup(): Promise<{
     sessionsDeleted: number;
     agentsDeleted: number;
+    documentsCleared: number; // NEW
   }> {
-    const [sessionsDeleted, agentsDeleted] = await Promise.all([
-      this.dbService.cleanupOldSessions(30), // 30 days
-      this.dbService.cleanupOfflineAgents(1), // 1 hour
-    ]);
+    const [sessionsDeleted, agentsDeleted, documentsCleared] =
+      await Promise.all([
+        this.dbService.cleanupOldSessions(30), // 30 days
+        this.dbService.cleanupOfflineAgents(1), // 1 hour
+        this.documentService.clearAllDocuments(), // NEW: Only in development
+      ]);
 
     console.log(
-      `🧹 Cleanup completed: ${sessionsDeleted} sessions, ${agentsDeleted} agents deleted`
+      `🧹 Cleanup completed: ${sessionsDeleted} sessions, ${agentsDeleted} agents, ${documentsCleared} documents deleted`
     );
 
     return {
       sessionsDeleted,
       agentsDeleted,
+      documentsCleared, // NEW
     };
+  }
+
+  // ============= NEW: EXPOSE DOCUMENT SERVICE =============
+
+  getDocumentService(): DocumentService {
+    return this.documentService;
   }
 }

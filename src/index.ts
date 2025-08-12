@@ -8,6 +8,7 @@ import {
   closeDatabaseConnection,
 } from './database/db';
 import { closeRedisConnections } from './config/redis';
+import agentSettingsRouter from './routes/agentSettings'; // NEW: Import RAG routes
 
 // Validate required environment variables
 if (!process.env.OPENAI_API_KEY) {
@@ -65,9 +66,14 @@ app.get('/api/info', (req, res) => {
       transferToHuman: true,
       persistence: true,
       queueManagement: true,
+      rag: true, // NEW: RAG feature
+      knowledgeBase: true, // NEW: Knowledge base feature
     },
   });
 });
+
+// NEW: Agent Settings API routes (RAG functionality)
+app.use('/api/agent-settings', agentSettingsRouter);
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
@@ -112,6 +118,7 @@ async function startServer() {
       console.log(`║ 🗄️  Database: PostgreSQL               ║`);
       console.log(`║ 🔄 Queue: Redis                        ║`);
       console.log(`║ 🤖 OpenAI: Configured                  ║`);
+      console.log(`║ 📚 RAG: Knowledge Base Ready           ║`); // NEW
       console.log(
         `║ 🌍 CORS: ${process.env.FRONTEND_URL || 'http://localhost:3000'}    ║`
       );

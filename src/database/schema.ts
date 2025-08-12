@@ -8,8 +8,22 @@ import {
   jsonb,
   index,
   unique,
+  customType,
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
+
+// Custom vector type for pgvector
+const vector = customType<{ data: number[]; driverData: string }>({
+  dataType() {
+    return 'vector(1536)';
+  },
+  toDriver(value: number[]): string {
+    return `[${value.join(',')}]`;
+  },
+  fromDriver(value: string): number[] {
+    return value.slice(1, -1).split(',').map(Number);
+  },
+});
 
 // Enums for type safety
 export const sessionStatusEnum = pgEnum('session_status', [
@@ -37,6 +51,34 @@ export const transferPriorityEnum = pgEnum('transfer_priority', [
   'normal',
   'high',
 ]);
+
+// Knowledge Documents Table (NEW - for RAG)
+export const knowledgeDocuments = pgTable(
+  'knowledge_documents',
+  {
+    id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+    title: varchar('title', { length: 255 }).notNull(),
+    content: text('content').notNull(),
+    embedding: vector('embedding'), // Custom vector type
+    metadata: jsonb('metadata')
+      .$type<Record<string, any>>()
+      .notNull()
+      .default({}),
+
+    // Timestamps
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at')
+      .notNull()
+      .defaultNow()
+      .$onUpdateFn(() => new Date()),
+  },
+  (table) => ({
+    titleIdx: index('knowledge_documents_title_idx').on(table.title),
+    createdAtIdx: index('knowledge_documents_created_at_idx').on(
+      table.createdAt
+    ),
+  })
+);
 
 // Chat Sessions Table
 export const chatSessions = pgTable(
@@ -191,6 +233,13 @@ export const sessionAnalytics = pgTable(
 );
 
 // Relations for better querying
+export const knowledgeDocumentsRelations = relations(
+  knowledgeDocuments,
+  ({ many }) => ({
+    // Add relations here if needed in the future
+  })
+);
+
 export const chatSessionsRelations = relations(
   chatSessions,
   ({ many, one }) => ({
@@ -239,6 +288,8 @@ export const sessionAnalyticsRelations = relations(
 );
 
 // Type exports for use in application
+export type KnowledgeDocument = typeof knowledgeDocuments.$inferSelect;
+export type NewKnowledgeDocument = typeof knowledgeDocuments.$inferInsert;
 export type ChatSession = typeof chatSessions.$inferSelect;
 export type NewChatSession = typeof chatSessions.$inferInsert;
 export type Message = typeof messages.$inferSelect;

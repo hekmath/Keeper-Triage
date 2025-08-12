@@ -15,6 +15,20 @@
       "when": 1754949570974,
       "tag": "20250811215930_fat_longshot",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1755038634151,
+      "tag": "20250812224354_bored_power_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1755038900853,
+      "tag": "20250812224820_gigantic_vargas",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+DROP INDEX "knowledge_documents_embedding_idx";
