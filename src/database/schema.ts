@@ -9,15 +9,20 @@ import {
   index,
   unique,
   customType,
+  serial,
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
-// Custom vector type for pgvector
+/**
+ * Custom pgvector type helper
+ * IMPORTANT: If you switch to text-embedding-3-small, change to vector(1536)
+ */
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
-    return 'vector(1536)';
+    return 'vector(3072)';
   },
   toDriver(value: number[]): string {
+    // pgvector array literal (unquoted)
     return `[${value.join(',')}]`;
   },
   fromDriver(value: string): number[] {
@@ -25,7 +30,7 @@ const vector = customType<{ data: number[]; driverData: string }>({
   },
 });
 
-// Enums for type safety
+// ======================== Enums ========================
 export const sessionStatusEnum = pgEnum('session_status', [
   'bot',
   'waiting',
@@ -52,20 +57,18 @@ export const transferPriorityEnum = pgEnum('transfer_priority', [
   'high',
 ]);
 
-// Knowledge Documents Table (NEW - for RAG)
+// ======================== Knowledge Documents ========================
 export const knowledgeDocuments = pgTable(
   'knowledge_documents',
   {
     id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
     title: varchar('title', { length: 255 }).notNull(),
     content: text('content').notNull(),
-    embedding: vector('embedding'), // Custom vector type
+    embedding: vector('embedding'), // can be null (we'll compute centroid)
     metadata: jsonb('metadata')
       .$type<Record<string, any>>()
       .notNull()
       .default({}),
-
-    // Timestamps
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at')
       .notNull()
@@ -80,11 +83,48 @@ export const knowledgeDocuments = pgTable(
   })
 );
 
-// Chat Sessions Table
+// NEW: Chunk table for RAG
+export const knowledgeDocumentChunks = pgTable(
+  'knowledge_document_chunks',
+  {
+    id: serial('id').primaryKey(),
+    docId: integer('doc_id')
+      .notNull()
+      .references(() => knowledgeDocuments.id, { onDelete: 'cascade' }),
+    chunkIndex: integer('chunk_index').notNull(),
+    content: text('content').notNull(),
+    embedding: vector('embedding').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    docIdIdx: index('kdc_doc_id_idx').on(table.docId),
+    orderIdx: index('kdc_doc_order_idx').on(table.docId, table.chunkIndex),
+  })
+);
+
+// Relations for future use
+export const knowledgeDocumentsRelations = relations(
+  knowledgeDocuments,
+  ({ many }) => ({
+    // add if needed later
+  })
+);
+
+export const knowledgeDocumentChunksRelations = relations(
+  knowledgeDocumentChunks,
+  ({ one }) => ({
+    document: one(knowledgeDocuments, {
+      fields: [knowledgeDocumentChunks.docId],
+      references: [knowledgeDocuments.id],
+    }),
+  })
+);
+
+// ======================== Chat Sessions ========================
 export const chatSessions = pgTable(
   'chat_sessions',
   {
-    id: varchar('id', { length: 36 }).primaryKey(), // UUID
+    id: varchar('id', { length: 36 }).primaryKey(),
     userId: varchar('user_id', { length: 255 }).notNull(),
     status: sessionStatusEnum('status').notNull().default('bot'),
     assignedAgent: varchar('assigned_agent', { length: 36 }).references(
@@ -95,8 +135,6 @@ export const chatSessions = pgTable(
       .$type<Record<string, any>>()
       .notNull()
       .default({}),
-
-    // Timestamps
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at')
       .notNull()
@@ -113,11 +151,11 @@ export const chatSessions = pgTable(
   })
 );
 
-// Messages Table
+// ======================== Messages ========================
 export const messages = pgTable(
   'messages',
   {
-    id: varchar('id', { length: 36 }).primaryKey(), // UUID
+    id: varchar('id', { length: 36 }).primaryKey(),
     sessionId: varchar('session_id', { length: 36 })
       .notNull()
       .references(() => chatSessions.id, { onDelete: 'cascade' }),
@@ -127,8 +165,6 @@ export const messages = pgTable(
       .$type<Record<string, any>>()
       .notNull()
       .default({}),
-
-    // Timestamps
     timestamp: timestamp('timestamp').notNull().defaultNow(),
   },
   (table) => ({
@@ -138,11 +174,11 @@ export const messages = pgTable(
   })
 );
 
-// Agents Table
+// ======================== Agents ========================
 export const agents = pgTable(
   'agents',
   {
-    id: varchar('id', { length: 36 }).primaryKey(), // UUID
+    id: varchar('id', { length: 36 }).primaryKey(),
     socketId: varchar('socket_id', { length: 255 }).notNull(),
     name: varchar('name', { length: 255 }).notNull(),
     status: agentStatusEnum('status').notNull().default('available'),
@@ -150,8 +186,6 @@ export const agents = pgTable(
       .$type<Record<string, any>>()
       .notNull()
       .default({}),
-
-    // Timestamps
     joinedAt: timestamp('joined_at').notNull().defaultNow(),
     lastActiveAt: timestamp('last_active_at').notNull().defaultNow(),
   },
@@ -162,7 +196,7 @@ export const agents = pgTable(
   })
 );
 
-// Transfer Queue Table (for persistence and analytics)
+// ======================== Transfer Queue ========================
 export const transferQueue = pgTable(
   'transfer_queue',
   {
@@ -173,13 +207,9 @@ export const transferQueue = pgTable(
     reason: text('reason').notNull(),
     priority: transferPriorityEnum('priority').notNull().default('normal'),
     position: integer('position').notNull().default(0),
-
-    // Timestamps
     requestedAt: timestamp('requested_at').notNull().defaultNow(),
     processedAt: timestamp('processed_at'),
-
-    // Status
-    isActive: integer('is_active').notNull().default(1), // 1 = active, 0 = processed/removed
+    isActive: integer('is_active').notNull().default(1),
   },
   (table) => ({
     sessionIdIdx: unique('transfer_queue_session_id_unique').on(
@@ -194,7 +224,7 @@ export const transferQueue = pgTable(
   })
 );
 
-// Session Analytics (optional - for reporting)
+// ======================== Session Analytics ========================
 export const sessionAnalytics = pgTable(
   'session_analytics',
   {
@@ -202,23 +232,15 @@ export const sessionAnalytics = pgTable(
     sessionId: varchar('session_id', { length: 36 })
       .notNull()
       .references(() => chatSessions.id, { onDelete: 'cascade' }),
-
-    // Metrics
     totalMessages: integer('total_messages').notNull().default(0),
     botMessages: integer('bot_messages').notNull().default(0),
     userMessages: integer('user_messages').notNull().default(0),
     agentMessages: integer('agent_messages').notNull().default(0),
-
-    // Timing
-    sessionDuration: integer('session_duration'), // in seconds
-    queueWaitTime: integer('queue_wait_time'), // in seconds
-    agentResponseTime: integer('agent_response_time'), // average in seconds
-
-    // Transfer info
-    wasTransferred: integer('was_transferred').notNull().default(0), // 0 = no, 1 = yes
+    sessionDuration: integer('session_duration'),
+    queueWaitTime: integer('queue_wait_time'),
+    agentResponseTime: integer('agent_response_time'),
+    wasTransferred: integer('was_transferred').notNull().default(0),
     transferReason: text('transfer_reason'),
-
-    // Timestamps
     createdAt: timestamp('created_at').notNull().defaultNow(),
   },
   (table) => ({
@@ -232,14 +254,7 @@ export const sessionAnalytics = pgTable(
   })
 );
 
-// Relations for better querying
-export const knowledgeDocumentsRelations = relations(
-  knowledgeDocuments,
-  ({ many }) => ({
-    // Add relations here if needed in the future
-  })
-);
-
+// ======================== Relations ========================
 export const chatSessionsRelations = relations(
   chatSessions,
   ({ many, one }) => ({
@@ -287,9 +302,15 @@ export const sessionAnalyticsRelations = relations(
   })
 );
 
-// Type exports for use in application
+// ======================== Type exports ========================
 export type KnowledgeDocument = typeof knowledgeDocuments.$inferSelect;
 export type NewKnowledgeDocument = typeof knowledgeDocuments.$inferInsert;
+
+export type KnowledgeDocumentChunk =
+  typeof knowledgeDocumentChunks.$inferSelect;
+export type NewKnowledgeDocumentChunk =
+  typeof knowledgeDocumentChunks.$inferInsert;
+
 export type ChatSession = typeof chatSessions.$inferSelect;
 export type NewChatSession = typeof chatSessions.$inferInsert;
 export type Message = typeof messages.$inferSelect;
